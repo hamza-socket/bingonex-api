@@ -1,0 +1,26 @@
+{
+  "name": "bingo-api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate:local": "wrangler d1 migrations apply bingo --local",
+    "db:migrate:remote": "wrangler d1 migrations apply bingo --remote"
+  },
+  "dependencies": {
+    "@hono/zod-validator": "^0.9.1",
+    "drizzle-orm": "^0.45.2",
+    "hono": "^4.13.8",
+    "jose": "^6.2.12",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260920.1",
+    "drizzle-kit": "^0.31.10",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.135.0"
+  }
+}

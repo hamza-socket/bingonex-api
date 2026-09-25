@@ -1,0 +1,29 @@
+{
+	"name": "bingo-api",
+	"main": "src/index.ts",
+	"compatibility_date": "2025-06-01",
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "bingo",
+			"database_id": "cf8fba52-643b-4ca2-81cf-05f138d71fde",
+			"migrations_dir": "drizzle"
+		},
+		{
+			"binding": "bingo",
+			"database_name": "bingo",
+			"database_id": "cf8fba52-643b-4ca2-81cf-05f138d71fde",
+			"remote": true
+		}
+	],
+	"vars": {
+		// Comma-separated: web, Android and iOS OAuth client IDs
+		"GOOGLE_CLIENT_IDS": "1234567890-abc.apps.googleusercontent.com"
+	},
+	// Cleans up stale matchmaking entries
+	"triggers": {
+		"crons": [
+			"*/10 * * * *"
+		]
+	}
+}
