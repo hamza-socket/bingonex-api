@@ -1,35 +1,26 @@
 {
 	"name": "bingo-api",
 	"main": "src/index.ts",
-	"compatibility_date": "2026-09-30",
+	"compatibility_date": "2025-06-01",
 	"d1_databases": [
 		{
 			"binding": "DB",
-			"database_name": "DB",
-			"database_id": "10a1aebc-fda9-4967-b387-e765b5f28158",
+			"database_name": "bingo",
+			"database_id": "cf8fba52-643b-4ca2-81cf-05f138d71fde",
 			"migrations_dir": "drizzle"
-		}
-	],
-	"durable_objects": {
-		"bindings": [
-			{
-				"name": "GAME_ROOMS",
-				"class_name": "GameRoom"
-			}
-		]
-	},
-	"migrations": [
+		},
 		{
-			"tag": "v1",
-			"new_sqlite_classes": [
-				"GameRoom"
-			]
+			"binding": "bingo",
+			"database_name": "bingo",
+			"database_id": "cf8fba52-643b-4ca2-81cf-05f138d71fde",
+			"remote": true
 		}
 	],
 	"vars": {
-		"GOOGLE_CLIENT_IDS": "148324533691-qijjevmbm2e321qcbn4kept264nhd88o.apps.googleusercontent.com",
-		"JWT_SECRET": "12345678"
+		// Comma-separated: web, Android and iOS OAuth client IDs
+		"GOOGLE_CLIENT_IDS": "1234567890-abc.apps.googleusercontent.com"
 	},
+	// Cleans up stale matchmaking entries
 	"triggers": {
 		"crons": [
 			"*/10 * * * *"

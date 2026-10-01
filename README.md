@@ -5,17 +5,17 @@ counts lines, decides the winner, and hides the opponent's card until the game e
 
 ## Setup
 ```bash
-pnpm install
-pnpm wrangler login
-pnpm exec wrangler d1 create bingo     # paste the database_id into wrangler.jsonc
-pnpm exec wrangler secret put JWT_SECRET
+npm install
+npx wrangler login
+npx wrangler d1 create bingo          # paste the database_id into wrangler.jsonc
+npx wrangler secret put JWT_SECRET    # any long random string
 # edit GOOGLE_CLIENT_IDS in wrangler.jsonc (see below)
 
-pnpm run db:generate
-pnpm run db:migrate:remote
-pnpm run deploy
+npm run db:generate                   # after any schema change
+npm run db:migrate:remote
+npm run deploy
 ```
-Local dev: `cp .dev.vars.example .dev.vars && pnpm run db:migrate:local && pnpm run dev`
+Local dev: `cp .dev.vars.example .dev.vars && npm run db:migrate:local && npm run dev`
 
 ## Google login
 1. Google Cloud Console -> APIs & Services -> Credentials -> create OAuth client IDs
