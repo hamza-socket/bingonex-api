@@ -2,10 +2,16 @@
   "name": "bingo-api",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=20.11.0 <21"
+  },
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
+    "test": "node --test",
+    "lint": "biome check .",
+    "format": "biome format --write .",
     "db:generate": "drizzle-kit generate",
     "db:migrate:local": "wrangler d1 migrations apply bingo --local",
     "db:migrate:remote": "wrangler d1 migrations apply bingo --remote"
@@ -18,9 +24,11 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.14",
     "@cloudflare/workers-types": "^5.20260920.1",
     "drizzle-kit": "^0.31.10",
     "typescript": "^7.0.2",
+    "vitest": "^3.2.7",
     "wrangler": "^4.135.0"
   }
 }

@@ -8,6 +8,13 @@
       "when": 1789897089755,
       "tag": "0000_spicy_crusher_hogan",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1790764293725,
+      "tag": "0001_faithful_wendell_rand",
+      "breakpoints": true
     }
   ]
 }
