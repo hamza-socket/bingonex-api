@@ -1,0 +1,45 @@
+{
+  "name": "bingo-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-06-01",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "DB",
+      "database_id": "10a1aebc-fda9-4967-b387-e765b5f28158",
+      "migrations_dir": "drizzle"
+    },
+    {
+      "binding": "game_db",
+      "database_name": "DB",
+      "database_id": "10a1aebc-fda9-4967-b387-e765b5f28158"
+    }
+  ],
+  "vars": {
+    "GOOGLE_CLIENT_IDS": "1234567890-abc.apps.googleusercontent.com"
+  },
+  "triggers": {
+    "crons": ["*/10 * * * *"]
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "TTTRoom",
+        "name": "GAME_ROOM"
+      },
+      {
+        "class_name": "GameRoom",
+        "name": "GAME_ROOMS"
+      },
+      {
+        "class_name": "MatchmakingRoom",
+        "name": "MATCHMAKING_ROOM"
+      }
+    ]
+  },
+  "exports": {
+    "TTTRoom": { "type": "durable-object", "storage": "sqlite" },
+    "GameRoom": { "type": "durable-object", "storage": "sqlite" },
+    "MatchmakingRoom": { "type": "durable-object", "storage": "sqlite" }
+  }
+}

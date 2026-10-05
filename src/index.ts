@@ -2,12 +2,12 @@ import { lt } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import authRoutes from "./auth-routes/auth";
+import meRoutes from "./auth-routes/me";
 import * as schema from "./db/schema";
 import { GameRoom } from "./durable-object/game-room";
-import authRoutes from "./routes/auth";
-import gameRoutes from "./routes/games";
-import matchmakingRoutes from "./routes/matchmaking";
-import meRoutes from "./routes/me";
+import gameRoutes from "./routes/bingo/games";
+import matchmakingRoutes from "./routes/bingo/matchmaking";
 import type { AppEnv, Bindings } from "./types";
 
 const app = new Hono<AppEnv>();
@@ -29,6 +29,8 @@ app.onError((err, c) => {
   return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
 });
 
+export { MatchmakingRoom } from "./durable-object/matching-room";
+export { TTTRoom } from "./durable-object/ttt-room";
 export { GameRoom };
 
 export default {

@@ -8,6 +8,7 @@ export type Bindings = {
   JWT_SECRET?: string;
   GOOGLE_CLIENT_IDS?: string;
   GAME_ROOMS: DurableObjectNamespace;
+  MATCHMAKING_ROOM: DurableObjectNamespace;
 };
 
 export type Variables = { userId: string; db: Db };

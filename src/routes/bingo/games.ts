@@ -2,10 +2,10 @@ import { zValidator } from "@hono/zod-validator";
 import { and, eq, or } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
-import { type Game, games, users } from "../db/schema";
-import { requireAuth } from "../lib/auth";
-import { countLines, numberSchema, WIN_LINES } from "../lib/bingo";
-import type { AppEnv, Db } from "../types";
+import { type Game, games, users } from "../../db/schema";
+import { requireAuth } from "../../lib/auth";
+import { countLines, numberSchema, WIN_LINES } from "../../lib/bingo";
+import type { AppEnv, Db } from "../../types";
 
 const gamesRoute = new Hono<AppEnv>();
 gamesRoute.use("*", requireAuth);

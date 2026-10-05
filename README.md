@@ -43,6 +43,14 @@ Local dev: `cp .dev.vars.example .dev.vars && pnpm run db:migrate:local && pnpm 
 Client tip: mark your own card locally from `called`; the winner is when `yourLines >= 5`
 (server sets `status: "finished"` and `outcome`).
 
+## Shared matchmaking
+All games use one globally named `MatchmakingRoom` Durable Object. Queue entries include a
+`gameId`, and the object only matches players with the same ID, so queues stay isolated while
+sharing the same matchmaking service. Bingo uses the internal join/status/cancel/ack operations
+and keeps its game-specific card and room setup in the Bingo routes. Tic-tac-toe keeps its
+WebSocket/token flow. Future games can use the same queue operations with their own `gameId`
+and metadata, then initialize their own game room from the returned match.
+
 ## Not included yet (good next steps)
 - Realtime: swap polling for a Durable Object WebSocket per game (free plan supports SQLite-backed DOs).
 - Auto-forfeit of abandoned games (add `updatedAt` + extend the cron).
