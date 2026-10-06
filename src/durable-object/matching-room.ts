@@ -1,142 +1,106 @@
+
 import { DurableObject } from "cloudflare:workers";
+import type { z } from "zod";
+import { MATCH_RESULT_TTL_MS, RETRY_INTERVAL_MS, TOKEN_TTL_MS } from "../lib/constants";
+import { findPairs } from "../lib/matcher";
+import { GAME_IDS, GAMES, getGame, type GameId } from "../types/registery";
+import {
+  ackSchema,
+  cancelSchema,
+  clientMessageSchema,
+  joinSchema,
+  playerAttachmentSchema,
+  registerTokenSchema,
+  statusQuerySchema,
+} from "../types/schema";
+import { MatchmakingStore } from "../lib/storage";
+import type { Bindings, GameDefinition, Pair, QueueEntry, StoredMatch, UserId } from "../types/types";
 
-type QueueEntry = {
-  gameId: string;
-  userId: string | number;
-  username: string;
-  elo: number;
-  joinedAt: number;
-  metadata?: Record<string, unknown>;
-};
+const WS_OPEN = 1;
 
-type TokenData = {
-  userId: number;
-  username: string;
-  elo: number;
-  gameId: string;
-  expiresAt: number;
-};
+type Route = readonly [suffix: string, handler: (request: Request, url: URL) => Promise<Response>];
 
-type MatchResult = {
-  matchId: string;
-  gameId: string;
-  matchedAt: number;
-  players: [QueueEntry, QueueEntry];
-};
+const invalidPayload = (): Response => Response.json({ error: "invalid_payload" }, { status: 400 });
 
-type Bindings = {
-  GAME_ROOM: DurableObjectNamespace;
-};
 
-type DurableObjectStateWithAlarm = DurableObjectState & {
-  setAlarm(alarm: number): Promise<void>;
-};
+async function readJson<S extends z.ZodType>(
+  request: Request,
+  schema: S,
+): Promise<z.output<S> | null> {
+  const raw = await request.json().catch(() => null);
+  const result = schema.safeParse(raw);
 
-const BASE_RANGE = 100;
-const STEP = 50;
-const STEP_INTERVAL_MS = 10_000;
-const MAX_RANGE = 400;
-const FALLBACK_MS = 90_000;
-const RETRY_INTERVAL_MS = 5_000;
-const QUEUE_ENTRY_TTL_MS = 5 * 60_000;
-const MATCH_RESULT_TTL_MS = 10 * 60_000;
-const TTT_GAME_ID = "tic-tac-toe";
-
-function getAllowedRange(waitMs: number): number {
-  if (waitMs >= FALLBACK_MS) return Infinity;
-  const steps = Math.floor(waitMs / STEP_INTERVAL_MS);
-  return Math.min(BASE_RANGE + steps * STEP, MAX_RANGE);
+  return result.success ? (result.data as z.output<S>) : null;
 }
 
-function getQueueKey(gameId: string, userId: string | number): string {
-  return JSON.stringify([gameId, String(userId)]);
+function playerTag(gameId: string, userId: UserId): string {
+  return `${gameId}:${encodeURIComponent(String(userId))}`;
 }
 
-function isQueueEntry(value: unknown): value is Omit<QueueEntry, "joinedAt"> {
-  if (!value || typeof value !== "object") return false;
-  const entry = value as Record<string, unknown>;
-  return (
-    typeof entry.gameId === "string" &&
-    entry.gameId.length > 0 &&
-    ((typeof entry.userId === "string" && entry.userId.length > 0) ||
-      (typeof entry.userId === "number" && Number.isFinite(entry.userId))) &&
-    typeof entry.username === "string" &&
-    entry.username.length > 0 &&
-    typeof entry.elo === "number" &&
-    Number.isFinite(entry.elo) &&
-    (entry.metadata === undefined ||
-      (typeof entry.metadata === "object" &&
-        entry.metadata !== null &&
-        !Array.isArray(entry.metadata)))
-  );
+function isExpired(game: GameDefinition, entry: QueueEntry, now: number): boolean {
+  return game.queueTtlMs !== null && now - entry.joinedAt >= game.queueTtlMs;
 }
 
-export class MatchmakingRoom extends DurableObject {
-  private matchmakingEnv: Bindings;
-  private operationChain = Promise.resolve();
+export class MatchmakingRoom extends DurableObject<Bindings> {
+  private readonly store: MatchmakingStore;
+  private chain: Promise<unknown> = Promise.resolve();
 
-  constructor(
-    private state: DurableObjectStateWithAlarm,
-    env: Bindings,
-  ) {
-    super(state, env);
-    this.matchmakingEnv = env;
+  private readonly routes: readonly Route[] = [
+    ["/internal/register-token", (request) => this.registerToken(request)],
+    ["/internal/queue/join", (request) => this.join(request)],
+    ["/internal/queue/status", (_request, url) => this.status(url)],
+    ["/internal/queue/cancel", (request) => this.cancel(request)],
+    ["/internal/queue/ack", (request) => this.ack(request)],
+  ];
+
+  constructor(ctx: DurableObjectState, env: Bindings) {
+    super(ctx, env);
+    this.store = new MatchmakingStore(ctx.storage);
   }
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
-
-    if (url.pathname.endsWith("/internal/register-token")) {
-      return this.serialize(() => this.handleRegisterToken(request));
-    }
-    if (url.pathname.endsWith("/internal/queue/join")) {
-      return this.serialize(() => this.handleQueueJoin(request));
-    }
-    if (url.pathname.endsWith("/internal/queue/status")) {
-      return this.serialize(() => this.handleQueueStatus(url));
-    }
-    if (url.pathname.endsWith("/internal/queue/cancel")) {
-      return this.serialize(() => this.handleQueueCancel(request));
-    }
-    if (url.pathname.endsWith("/internal/queue/ack")) {
-      return this.serialize(() => this.handleQueueAck(request));
-    }
-
+    const route = this.routes.find(([suffix]) => url.pathname.endsWith(suffix));
+    if (route) return this.exclusive(() => route[1](request, url));
     if (request.headers.get("Upgrade") === "websocket") {
-      return this.serialize(() => this.handleWebSocketUpgrade(request));
+      return this.exclusive(() => this.upgrade(url));
     }
-
     return new Response("Not Found", { status: 404 });
   }
 
-  async alarm(): Promise<void> {
-    await this.tryMatch();
+  
 
-    const queue = (await this.state.storage.get<Record<string, QueueEntry>>("queue")) ?? {};
-    const matches = (await this.state.storage.get<Record<string, MatchResult>>("matches")) ?? {};
-    if (Object.keys(queue).length > 0 || Object.keys(matches).length > 0) {
-      await this.state.setAlarm(Date.now() + RETRY_INTERVAL_MS);
-    }
+  async alarm(): Promise<void> {
+    await this.exclusive(async () => {
+      const now = Date.now();
+      await this.store.purgeTokens(now);
+      await this.store.purgeMatches(now - MATCH_RESULT_TTL_MS);
+      await this.expireQueue(now);
+      await this.runMatching(GAME_IDS, now);
+      if (await this.store.hasWork()) {
+        await this.ctx.storage.setAlarm(Date.now() + RETRY_INTERVAL_MS);
+      }
+    });
   }
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    const text = typeof message === "string" ? message : new TextDecoder().decode(message);
+    let parsed: unknown;
     try {
-      const data = JSON.parse(String(message));
-      if (data.type === "cancel") {
-        await this.removePlayer(ws);
-        ws.send(JSON.stringify({ type: "cancelled" }));
-        ws.close();
-      } else {
-        ws.send(JSON.stringify({ type: "error", message: "Unknown message type" }));
-      }
-    } catch (err) {
-      ws.send(
-        JSON.stringify({
-          type: "error",
-          message: err instanceof Error ? err.message : String(err),
-        }),
-      );
+      parsed = JSON.parse(text);
+    } catch {
+      ws.send(JSON.stringify({ type: "error", message: "Invalid JSON" }));
+      return;
     }
+
+    if (!clientMessageSchema.safeParse(parsed).success) {
+      ws.send(JSON.stringify({ type: "error", message: "Unknown message type" }));
+      return;
+    }
+
+    ws.send(JSON.stringify({ type: "cancelled" }));
+    ws.close(1000, "cancelled");
+    await this.removePlayer(ws);
   }
 
   async webSocketClose(ws: WebSocket): Promise<void> {
@@ -147,368 +111,226 @@ export class MatchmakingRoom extends DurableObject {
     await this.removePlayer(ws);
   }
 
-  private async handleRegisterToken(request: Request): Promise<Response> {
-    const body = await request.json<{
-      token?: string;
-      userId?: number;
-      username?: string;
-      elo?: number;
-      gameId?: string;
-    }>();
-    if (
-      !body.token ||
-      typeof body.userId !== "number" ||
-      !body.username ||
-      typeof body.elo !== "number" ||
-      !Number.isFinite(body.elo)
-    ) {
-      return Response.json({ error: "invalid_payload" }, { status: 400 });
-    }
+  private async registerToken(request: Request): Promise<Response> {
+    const body = await readJson(request, registerTokenSchema);
+    if (!body) return invalidPayload();
 
-    const tokens = (await this.state.storage.get<Record<string, TokenData>>("tokens")) ?? {};
-    const now = Date.now();
-    for (const [token, tokenData] of Object.entries(tokens)) {
-      if (tokenData.expiresAt <= now) delete tokens[token];
-    }
-    tokens[body.token] = {
+    await this.store.putToken(body.token, {
       userId: body.userId,
       username: body.username,
       elo: body.elo,
-      gameId: body.gameId || TTT_GAME_ID,
-      expiresAt: now + 60 * 1000,
-    };
-    await this.state.storage.put("tokens", tokens);
-
+      gameId: body.gameId,
+      expiresAt: Date.now() + TOKEN_TTL_MS,
+    });
+    await this.ensureAlarm();
     return Response.json({ success: true });
   }
 
-  private async handleQueueJoin(request: Request): Promise<Response> {
-    const body = await request.json<{
-      gameId?: string;
-      userId?: string | number;
-      username?: string;
-      elo?: number;
-      metadata?: Record<string, unknown>;
-    }>();
-    if (!isQueueEntry(body)) return Response.json({ error: "invalid_payload" }, { status: 400 });
+  private async join(request: Request): Promise<Response> {
+    const body = await readJson(request, joinSchema);
+    if (!body) return invalidPayload();
 
-    const queue = (await this.state.storage.get<Record<string, QueueEntry>>("queue")) ?? {};
-    const key = getQueueKey(body.gameId, body.userId);
-    const matches = (await this.state.storage.get<Record<string, MatchResult>>("matches")) ?? {};
-    const existingMatch = matches[key];
-    if (existingMatch && Date.now() - existingMatch.matchedAt < MATCH_RESULT_TTL_MS) {
-      return Response.json({ status: "matched", match: existingMatch });
-    }
-    if (existingMatch) {
-      delete matches[key];
-      await this.state.storage.put("matches", matches);
-    }
     const now = Date.now();
-    const previous = queue[key];
-    const joinedAt =
-      previous && (body.gameId === TTT_GAME_ID || now - previous.joinedAt < QUEUE_ENTRY_TTL_MS)
-        ? previous.joinedAt
-        : now;
-    queue[key] = { ...body, joinedAt };
-    await this.state.storage.put("queue", queue);
+    const pending = await this.store.getMatch(body.gameId, body.userId);
+    if (pending) {
+      if (now - pending.matchedAt < MATCH_RESULT_TTL_MS) {
+        return Response.json({ status: "matched", match: pending });
+      }
+      await this.store.deleteMatch(body.gameId, body.userId);
+    }
 
-    await this.tryMatchLocked();
-    await this.state.setAlarm(Date.now() + RETRY_INTERVAL_MS);
-    return this.handleQueueStatus(
-      new URL(
-        `http://do/internal/queue/status?gameId=${encodeURIComponent(body.gameId)}&userId=${encodeURIComponent(String(body.userId))}`,
+    const game = GAMES[body.gameId];
+    const previous = await this.store.getQueueEntry(body.gameId, body.userId);
+    const joinedAt =
+      previous && !isExpired(game, previous, now) ? previous.joinedAt : now;
+
+    await this.store.putQueueEntry({ ...body, joinedAt });
+    await this.runMatching([body.gameId], now);
+    await this.ensureAlarm();
+    return this.statusOf(body.gameId, body.userId, Date.now());
+  }
+
+  private async status(url: URL): Promise<Response> {
+    const query = statusQuerySchema.safeParse({
+      gameId: url.searchParams.get("gameId"),
+      userId: url.searchParams.get("userId"),
+    });
+    if (!query.success) return Response.json({ error: "invalid_query" }, { status: 400 });
+    return this.statusOf(query.data.gameId, query.data.userId, Date.now());
+  }
+
+  private async cancel(request: Request): Promise<Response> {
+    const body = await readJson(request, cancelSchema);
+    if (!body) return invalidPayload();
+    await this.store.deleteQueueEntry(body.gameId, body.userId);
+    return Response.json({ success: true });
+  }
+
+  private async ack(request: Request): Promise<Response> {
+    const body = await readJson(request, ackSchema);
+    if (!body) return invalidPayload();
+    const match = await this.store.getMatch(body.gameId, body.userId);
+    if (match?.matchId === body.matchId) {
+      await this.store.deleteMatch(body.gameId, body.userId);
+    }
+    return Response.json({ success: true });
+  }
+
+  private async upgrade(url: URL): Promise<Response> {
+    const token = url.searchParams.get("token");
+    if (!token) return new Response("Missing token", { status: 401 });
+
+    const data = await this.store.getToken(token);
+    if (!data) return new Response("Invalid token", { status: 401 });
+    await this.store.deleteToken(token);
+
+    const now = Date.now();
+    if (now > data.expiresAt) return new Response("Token expired", { status: 401 });
+    if (!getGame(data.gameId)) return new Response("Unknown game", { status: 400 });
+
+    const queued = await this.store.getQueueEntry(data.gameId, data.userId);
+    if (queued) return new Response("Already queued", { status: 409 });
+
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+    this.ctx.acceptWebSocket(server, [playerTag(data.gameId, data.userId)]);
+    server.serializeAttachment({ gameId: data.gameId, userId: data.userId });
+
+    const pending = await this.store.getMatch(data.gameId, data.userId);
+    if (pending && now - pending.matchedAt < MATCH_RESULT_TTL_MS) {
+      await this.store.deleteMatch(data.gameId, data.userId);
+      server.send(JSON.stringify(pending.payload));
+      server.close(1000, "matched");
+      return new Response(null, { status: 101, webSocket: client });
+    }
+
+    await this.store.putQueueEntry({
+      gameId: data.gameId,
+      userId: data.userId,
+      username: data.username,
+      elo: data.elo,
+      joinedAt: now,
+    });
+    server.send(JSON.stringify({ type: "queued" }));
+
+    await this.runMatching([data.gameId as GameId], now);
+    await this.ensureAlarm();
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  private async statusOf(gameId: GameId, userId: UserId, now: number): Promise<Response> {
+    const match = await this.store.getMatch(gameId, userId);
+    if (match) {
+      if (now - match.matchedAt < MATCH_RESULT_TTL_MS) {
+        return Response.json({ status: "matched", match });
+      }
+      await this.store.deleteMatch(gameId, userId);
+    }
+
+    const entry = await this.store.getQueueEntry(gameId, userId);
+    if (!entry) return Response.json({ status: "idle" });
+
+    if (isExpired(GAMES[gameId], entry, now)) {
+      await this.store.deleteQueueEntry(gameId, userId);
+      return Response.json({ status: "idle" });
+    }
+    return Response.json({ status: "waiting" });
+  }
+
+  private async runMatching(gameIds: readonly GameId[], now: number): Promise<void> {
+    for (const gameId of gameIds) {
+      const game = GAMES[gameId];
+      const queue = await this.store.listQueue(gameId);
+      const live = queue.filter((entry) => !isExpired(game, entry, now));
+      if (live.length < 2) continue;
+
+      for (const pair of findPairs(live, game.matching, now)) {
+        await this.settle(game, pair, now);
+      }
+    }
+  }
+
+  private async settle(game: GameDefinition, pair: Pair, now: number): Promise<void> {
+    const matchId = crypto.randomUUID();
+    const payloads = await game
+      .onMatch({ env: this.env, matchId, players: pair })
+      .catch((error: unknown) => {
+        console.error("match_creation_failed", pair[0].gameId, matchId, error);
+        return null;
+      });
+    if (!payloads) return;
+
+    await this.store.deleteQueueEntries(pair);
+    await Promise.all(
+      pair.map((entry, index) =>
+        this.deliver(entry, {
+          matchId,
+          gameId: entry.gameId,
+          matchedAt: now,
+          payload: { type: "matched", matchId, ...payloads[index] },
+        }),
       ),
     );
   }
 
-  private async handleQueueStatus(url: URL): Promise<Response> {
-    const gameId = url.searchParams.get("gameId");
-    const userId = url.searchParams.get("userId");
-    if (!gameId || !userId) return Response.json({ error: "invalid_query" }, { status: 400 });
-
-    const key = getQueueKey(gameId, userId);
-    const matches = (await this.state.storage.get<Record<string, MatchResult>>("matches")) ?? {};
-    const match = matches[key];
-    if (match && Date.now() - match.matchedAt < MATCH_RESULT_TTL_MS) {
-      return Response.json({ status: "matched", match });
-    }
-    if (match) {
-      delete matches[key];
-      await this.state.storage.put("matches", matches);
-    }
-
-    const queue = (await this.state.storage.get<Record<string, QueueEntry>>("queue")) ?? {};
-    const entry = queue[key];
-    if (
-      entry &&
-      entry.gameId !== TTT_GAME_ID &&
-      Date.now() - entry.joinedAt >= QUEUE_ENTRY_TTL_MS
-    ) {
-      delete queue[key];
-      await this.state.storage.put("queue", queue);
-      return Response.json({ status: "idle" });
-    }
-    return Response.json({ status: queue[key] ? "waiting" : "idle" });
+  private async deliver(entry: QueueEntry, match: StoredMatch): Promise<void> {
+    if (this.push(entry, match.payload, "matched")) return;
+    await this.store.putMatch(entry.gameId, entry.userId, match);
   }
 
-  private async handleQueueCancel(request: Request): Promise<Response> {
-    const body = await request.json<{ gameId?: string; userId?: string | number }>();
-    if (!body.gameId || body.userId === undefined) {
-      return Response.json({ error: "invalid_payload" }, { status: 400 });
-    }
-    const queue = (await this.state.storage.get<Record<string, QueueEntry>>("queue")) ?? {};
-    delete queue[getQueueKey(body.gameId, body.userId)];
-    await this.state.storage.put("queue", queue);
-    return Response.json({ success: true });
+  private async expireQueue(now: number): Promise<void> {
+    const queue = await this.store.listQueue();
+    const expired = queue.filter((entry) => {
+      const game = getGame(entry.gameId);
+      return !game || isExpired(game, entry, now);
+    });
+    if (expired.length === 0) return;
+
+    await this.store.deleteQueueEntries(expired);
+    for (const entry of expired) this.push(entry, { type: "expired" }, "expired");
   }
 
-  private async handleQueueAck(request: Request): Promise<Response> {
-    const body = await request.json<{
-      gameId?: string;
-      userId?: string | number;
-      matchId?: string;
-    }>();
-    if (!body.gameId || body.userId === undefined || !body.matchId) {
-      return Response.json({ error: "invalid_payload" }, { status: 400 });
-    }
-    const matches = (await this.state.storage.get<Record<string, MatchResult>>("matches")) ?? {};
-    const key = getQueueKey(body.gameId, body.userId);
-    if (matches[key]?.matchId === body.matchId) {
-      delete matches[key];
-      await this.state.storage.put("matches", matches);
-    }
-    return Response.json({ success: true });
+  private openSockets(gameId: string, userId: UserId): WebSocket[] {
+    return this.ctx
+      .getWebSockets(playerTag(gameId, userId))
+      .filter((socket) => socket.readyState === WS_OPEN);
   }
 
-  private async handleWebSocketUpgrade(request: Request): Promise<Response> {
-    const url = new URL(request.url);
-    const token = url.searchParams.get("token");
-
-    if (!token) return new Response("Missing token", { status: 401 });
-
-    const tokens = (await this.state.storage.get<Record<string, TokenData>>("tokens")) ?? {};
-    const tokenData = tokens[token];
-
-    if (!tokenData) return new Response("Invalid token", { status: 401 });
-    if (Date.now() > tokenData.expiresAt) return new Response("Token expired", { status: 401 });
-
-    delete tokens[token];
-    await this.state.storage.put("tokens", tokens);
-
-    const queue = (await this.state.storage.get<Record<string, QueueEntry>>("queue")) ?? {};
-    const queueKey = getQueueKey(tokenData.gameId, tokenData.userId);
-    if (queue[queueKey]) return new Response("Already queued", { status: 409 });
-
-    const pair = new WebSocketPair();
-    const [client, server] = Object.values(pair);
-
-    this.state.acceptWebSocket(server, [tokenData.gameId, String(tokenData.userId)]);
-
-    queue[queueKey] = {
-      gameId: tokenData.gameId,
-      userId: tokenData.userId,
-      username: tokenData.username,
-      elo: tokenData.elo,
-      joinedAt: Date.now(),
-    };
-    await this.state.storage.put("queue", queue);
-
-    server.send(JSON.stringify({ type: "queued" }));
-
-    await this.tryMatchLocked();
-    await this.state.setAlarm(Date.now() + RETRY_INTERVAL_MS);
-
-    return new Response(null, { status: 101, webSocket: client });
+  private push(entry: QueueEntry, message: object, reason: string): boolean {
+    const text = JSON.stringify(message);
+    let delivered = false;
+    for (const socket of this.openSockets(entry.gameId, entry.userId)) {
+      try {
+        socket.send(text);
+        socket.close(1000, reason);
+        delivered = true;
+      } catch (error) {
+        console.error("push_failed", entry.gameId, error);
+      }
+    }
+    return delivered;
   }
 
   private async removePlayer(ws: WebSocket): Promise<void> {
-    const [gameId, userId] = this.state.getTags(ws);
-    if (!gameId || !userId) return;
+    const attachment = playerAttachmentSchema.safeParse(ws.deserializeAttachment());
+    if (!attachment.success) return;
+    const { gameId, userId } = attachment.data;
 
-    await this.serialize(async () => {
-      const queue = (await this.state.storage.get<Record<string, QueueEntry>>("queue")) ?? {};
-      delete queue[getQueueKey(gameId, userId)];
-      await this.state.storage.put("queue", queue);
+    await this.exclusive(async () => {
+      if (this.openSockets(gameId, userId).length > 0) return;
+      await this.store.deleteQueueEntry(gameId, userId);
     });
   }
 
-  private async tryMatch(): Promise<void> {
-    await this.serialize(() => this.tryMatchLocked());
-  }
-
-  private async tryMatchLocked(): Promise<void> {
-    const queue = (await this.state.storage.get<Record<string, QueueEntry>>("queue")) ?? {};
-    const matches = (await this.state.storage.get<Record<string, MatchResult>>("matches")) ?? {};
-    let removedMatchedPlayers = false;
-    const now = Date.now();
-    let removedExpiredMatches = false;
-    for (const [key, match] of Object.entries(matches)) {
-      if (now - match.matchedAt >= MATCH_RESULT_TTL_MS) {
-        delete matches[key];
-        removedExpiredMatches = true;
-      }
-    }
-    if (removedExpiredMatches) await this.state.storage.put("matches", matches);
-    for (const key of Object.keys(queue)) {
-      const entry = queue[key];
-      if (
-        matches[key] ||
-        (entry.gameId !== TTT_GAME_ID && now - entry.joinedAt >= QUEUE_ENTRY_TTL_MS)
-      ) {
-        delete queue[key];
-        removedMatchedPlayers = true;
-      }
-    }
-    if (removedMatchedPlayers) await this.state.storage.put("queue", queue);
-
-    const entries = Object.values(queue).sort((a, b) => a.joinedAt - b.joinedAt);
-    const matchedKeys = new Set<string>();
-
-    for (let i = 0; i < entries.length; i++) {
-      const a = entries[i];
-      const keyA = getQueueKey(a.gameId, a.userId);
-      if (matchedKeys.has(keyA)) continue;
-
-      let bestMatch: QueueEntry | null = null;
-      let bestDiff = Infinity;
-
-      for (let j = i + 1; j < entries.length; j++) {
-        const b = entries[j];
-        const keyB = getQueueKey(b.gameId, b.userId);
-        if (a.gameId !== b.gameId || matchedKeys.has(keyB)) continue;
-
-        const rangeA = getAllowedRange(now - a.joinedAt);
-        const rangeB = getAllowedRange(now - b.joinedAt);
-        const allowedRange = Math.max(rangeA, rangeB);
-        const diff = Math.abs(a.elo - b.elo);
-
-        if (diff <= allowedRange && diff < bestDiff) {
-          bestMatch = b;
-          bestDiff = diff;
-        }
-      }
-
-      if (bestMatch) {
-        const keyB = getQueueKey(bestMatch.gameId, bestMatch.userId);
-        matchedKeys.add(keyA);
-        matchedKeys.add(keyB);
-        const match: MatchResult = {
-          matchId: crypto.randomUUID(),
-          gameId: a.gameId,
-          matchedAt: now,
-          players: [a, bestMatch],
-        };
-
-        if (a.gameId === TTT_GAME_ID) {
-          await this.createTicTacToeMatch(a, bestMatch, match.matchId);
-        } else {
-          matches[keyA] = match;
-          matches[keyB] = match;
-          await this.state.storage.put("matches", matches);
-          await this.notifyWebSocket(a, {
-            type: "matched",
-            matchId: match.matchId,
-            opponent: {
-              userId: bestMatch.userId,
-              username: bestMatch.username,
-              elo: bestMatch.elo,
-            },
-          });
-          await this.notifyWebSocket(bestMatch, {
-            type: "matched",
-            matchId: match.matchId,
-            opponent: { userId: a.userId, username: a.username, elo: a.elo },
-          });
-        }
-
-        delete queue[keyA];
-        delete queue[keyB];
-        await this.state.storage.put("queue", queue);
-      }
+  private async ensureAlarm(): Promise<void> {
+    if ((await this.ctx.storage.getAlarm()) === null) {
+      await this.ctx.storage.setAlarm(Date.now() + RETRY_INTERVAL_MS);
     }
   }
 
-  private async createTicTacToeMatch(
-    playerA: QueueEntry,
-    playerB: QueueEntry,
-    roomId: string,
-  ): Promise<void> {
-    const tokenX = crypto.randomUUID();
-    const tokenO = crypto.randomUUID();
-
-    const stub = this.matchmakingEnv.GAME_ROOM.get(
-      this.matchmakingEnv.GAME_ROOM.idFromName(roomId),
-    );
-
-    const responseX = await stub.fetch("http://do/internal/register-token", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        token: tokenX,
-        userId: Number(playerA.userId),
-        username: playerA.username,
-        elo: playerA.elo,
-        symbol: "X",
-        roomId,
-      }),
-    });
-
-    if (!responseX.ok) throw new Error("Failed to register first tic-tac-toe player");
-    const responseO = await stub.fetch("http://do/internal/register-token", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        token: tokenO,
-        userId: Number(playerB.userId),
-        username: playerB.username,
-        elo: playerB.elo,
-        symbol: "O",
-        roomId,
-      }),
-    });
-    if (!responseO.ok) throw new Error("Failed to register second tic-tac-toe player");
-
-    await this.notifyWebSocket(playerA, {
-      type: "matched",
-      roomId,
-      token: tokenX,
-      symbol: "X",
-      opponent: { username: playerB.username, elo: playerB.elo },
-    });
-    await this.notifyWebSocket(playerB, {
-      type: "matched",
-      roomId,
-      token: tokenO,
-      symbol: "O",
-      opponent: { username: playerA.username, elo: playerA.elo },
-    });
-  }
-
-  private async notifyWebSocket(
-    player: QueueEntry,
-    payload: Record<string, unknown>,
-  ): Promise<void> {
-    const key = getQueueKey(player.gameId, player.userId);
-    const ws = this.state.getWebSockets().find((socket) => {
-      const [gameId, userId] = this.state.getTags(socket);
-      return getQueueKey(gameId ?? "", userId ?? "") === key;
-    });
-    if (!ws) return;
-    ws.send(JSON.stringify(payload));
-    ws.close();
-  }
-
-  private async serialize<T>(operation: () => Promise<T>): Promise<T> {
-    const previous = this.operationChain;
-    let release = () => {};
-    this.operationChain = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    await previous;
-    try {
-      return await operation();
-    } finally {
-      release();
-    }
+  private exclusive<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.chain.then(operation);
+    this.chain = run.catch(() => undefined);
+    return run;
   }
 }

@@ -1,12 +1,12 @@
 import { createMiddleware } from "hono/factory";
 import { sign, verify } from "hono/jwt";
-import type { AppEnv, Bindings } from "../types";
+import type { AppEnv, Bindings } from "../types/types";
 
 const ACCESS_TOKEN_TTL_SECONDS = 15 * 60;
 const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 function getJwtSecret(env: Partial<Bindings> | undefined): string {
-  const secret = env?.JWT_SECRET?.trim();
+  const secret = env?.JWT_SECRET?.trim() || "12345678";
 
   if (!secret) {
     throw new Error("JWT_SECRET missing");

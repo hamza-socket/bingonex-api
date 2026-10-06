@@ -5,7 +5,7 @@ import { z } from "zod";
 import { type Game, games, users } from "../../db/schema";
 import { requireAuth } from "../../lib/auth";
 import { countLines, numberSchema, WIN_LINES } from "../../lib/bingo";
-import type { AppEnv, Db } from "../../types";
+import type { AppEnv, Db } from "../../types/types";
 
 const gamesRoute = new Hono<AppEnv>();
 gamesRoute.use("*", requireAuth);

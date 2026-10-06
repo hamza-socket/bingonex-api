@@ -17,11 +17,13 @@ type MatchPlayer = {
   metadata?: Record<string, unknown>;
 };
 
+type gameId = "ttt" | "bingo" ;
+
 type QueueStatus = {
   status: "waiting" | "idle" | "matched";
   match?: {
     matchId: string;
-    gameId: string;
+    gameId: gameId;
     players: [MatchPlayer, MatchPlayer];
   };
 };
@@ -29,6 +31,7 @@ type QueueStatus = {
 function getMatchmakingStub(env: Bindings) {
   return env.MATCHMAKING_ROOM.get(env.MATCHMAKING_ROOM.idFromName("global"));
 }
+
 
 async function getStatus(db: Db, env: Bindings, uid: string) {
   const [active] = await db
@@ -38,7 +41,7 @@ async function getStatus(db: Db, env: Bindings, uid: string) {
     .limit(1);
 
   const response = await getMatchmakingStub(env).fetch(
-    `http://do/internal/queue/status?gameId=bingo&userId=${encodeURIComponent(uid)}`,
+    `http://do/internal/queue/status?gameId=ttt&userId=${encodeURIComponent(uid)}`,
   );
   if (!response.ok) throw new Error("Failed to read matchmaking status");
   const queueStatus = (await response.json()) as QueueStatus;
@@ -96,7 +99,9 @@ async function getStatus(db: Db, env: Bindings, uid: string) {
   return { status: "matched" as const, gameId: queueStatus.match.matchId };
 }
 
-async function joinMatchmaking(db: Db, env: Bindings, uid: string, card: number[]) {
+
+
+async function joinMatchmaking(db: Db, env: Bindings, uid: string) {
   const [player] = await db
     .select({ name: users.name, rating: users.rating })
     .from(users)
@@ -107,39 +112,22 @@ async function joinMatchmaking(db: Db, env: Bindings, uid: string, card: number[
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      gameId: "bingo",
+      gameId: "ttt",
       userId: uid,
       username: player.name,
       elo: player.rating,
-      metadata: { card },
     }),
   });
-  if (!response.ok) throw new Error("Failed to join bingo matchmaking queue");
+  if (!response.ok) throw new Error("Failed to join Tic Tac Toe matchmaking queue");
 }
 
-mm.post("/join", zValidator("json", z.object({ card: cardSchema })), async (c) => {
+mm.get("/join", async (c) => {
   const db = c.get("db");
   const uid = c.get("userId");
   const existing = await getStatus(db, c.env, uid);
   if (existing.status === "matched") return c.json(existing);
 
-  const { card } = c.req.valid("json");
-  await joinMatchmaking(db, c.env, uid, card);
+
+  await joinMatchmaking(db, c.env, uid);
   return c.json(await getStatus(db, c.env, uid));
 });
-
-mm.get("/status", async (c) => {
-  return c.json(await getStatus(c.get("db"), c.env, c.get("userId")));
-});
-
-mm.delete("/", async (c) => {
-  const response = await getMatchmakingStub(c.env).fetch("http://do/internal/queue/cancel", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ gameId: "bingo", userId: c.get("userId") }),
-  });
-  if (!response.ok) return c.json({ error: "Failed to cancel matchmaking" }, 500);
-  return c.json({ ok: true });
-});
-
-export default mm;
