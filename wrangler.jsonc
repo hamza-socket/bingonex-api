@@ -8,6 +8,11 @@
       "database_name": "DB",
       "database_id": "10a1aebc-fda9-4967-b387-e765b5f28158",
       "migrations_dir": "drizzle"
+    },
+    {
+      "binding": "game_db",
+      "database_name": "DB",
+      "database_id": "10a1aebc-fda9-4967-b387-e765b5f28158"
     }
   ],
   "vars": {
@@ -20,11 +25,11 @@
     "bindings": [
       {
         "class_name": "TTTRoom",
-        "name": "TTT_ROOM"
+        "name": "GAME_ROOM"
       },
       {
         "class_name": "GameRoom",
-        "name": "BINGO_ROOM"
+        "name": "GAME_ROOMS"
       },
       {
         "class_name": "MatchmakingRoom",
