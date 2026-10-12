@@ -5,10 +5,9 @@ import { cors } from "hono/cors";
 import authRoutes from "./auth-routes/auth";
 import meRoutes from "./auth-routes/me";
 import * as schema from "./db/schema";
-import { GameRoom } from "./durable-object/game-room";
 import gameRoutes from "./routes/bingo/games";
 import matchmakingRoutes from "./routes/bingo/matchmaking";
-import type { AppEnv, Bindings } from "./types";
+import type { AppEnv, Bindings } from "../src/types";
 
 const app = new Hono<AppEnv>();
 
@@ -29,9 +28,9 @@ app.onError((err, c) => {
   return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
 });
 
-export { MatchmakingRoom } from "./durable-object/matching-room";
-export { TTTRoom } from "./durable-object/ttt-room";
-export { GameRoom };
+export { MatchmakingRoom } from "./matchmaking-DO/matching-room";
+export { TTTRoom } from "./game-room-DOs/ttt-room";
+export { GameRoom } from "./game-room-DOs/bingo-room";
 
 export default {
   fetch: app.fetch,

@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { requireAuth } from "../../lib/auth";
 
 type Bindings = {
-  game_db: D1Database;
+  DB: D1Database;
   JWT_SECRET: string;
   GAME_ROOM: DurableObjectNamespace;
   MATCHMAKING_ROOM: DurableObjectNamespace;
@@ -24,7 +24,7 @@ ttt.post("/rooms/:pulic", requireAuth, async (c) => {
 
     console.log(username, pulic);
 
-    const playerData = await c.env.game_db
+    const playerData = await c.env.DB
       .prepare("SELECT id, elo FROM users WHERE name = ?")
       .bind(username)
       .first<{ id: number; elo: number }>();
@@ -73,7 +73,7 @@ ttt.post("/queue", requireAuth, async (c) => {
   try {
     const username = c.get("user").sub;
 
-    const playerData = await c.env.game_db
+    const playerData = await c.env.DB
       .prepare("SELECT id, elo FROM users WHERE name = ?")
       .bind(username)
       .first<{ id: number; elo: number }>();
@@ -121,7 +121,7 @@ ttt.post("/rooms/:id/join", requireAuth, async (c) => {
     const username = c.get("user").sub;
     const roomId = c.req.param("id");
 
-    const playerData = await c.env.game_db
+    const playerData = await c.env.DB
       .prepare("SELECT id, elo FROM users WHERE name = ?")
       .bind(username)
       .first<{ id: number; elo: number }>();
@@ -158,7 +158,7 @@ ttt.post("/rooms/:id/join", requireAuth, async (c) => {
     if (!res.ok) return c.json({ error: "Failed to join room" }, 500);
 
     if (res.ok) {
-      await c.env.game_db
+      await c.env.DB
         .prepare("UPDATE game SET total_games_played = total_games_played + 1 WHERE name = ?")
         .bind("TTT")
         .run();
@@ -175,7 +175,7 @@ ttt.post("/rooms/:id/reconnect", requireAuth, async (c) => {
     const username = c.get("user").sub;
     const roomId = c.req.param("id");
 
-    const playerData = await c.env.game_db
+    const playerData = await c.env.DB
       .prepare("SELECT id FROM users WHERE name = ?")
       .bind(username)
       .first<{ id: number }>();
@@ -253,7 +253,7 @@ ttt.get("/leaderboard", async (c) => {
       Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 100) : 20;
     const offset = Number.isFinite(rawOffset) && rawOffset >= 0 ? Math.floor(rawOffset) : 0;
 
-    const result = await c.env.game_db
+    const result = await c.env.DB
       .prepare(
         `SELECT
                     name,
